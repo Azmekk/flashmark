@@ -2,17 +2,22 @@
 //!
 //! Fake flash drives report a large capacity but silently wrap or discard
 //! writes beyond the real storage. Both modes write deterministic pattern data
-//! (regenerable from the byte offset alone) into numbered files on the
-//! filesystem, then read it back:
+//! (regenerable from the byte offset alone) into files on the filesystem, then
+//! read it back:
 //!
 //! - **full**: writes every free byte, then verifies every byte. Slow but
 //!   conclusive; the first corrupt offset estimates the real capacity.
-//! - **quick**: preallocates the same span of files without writing their
-//!   bodies, then writes and verifies 4K markers at the start, middle, and end
-//!   of each file. Address-wrapping fakes corrupt earlier markers when later
-//!   ones land on the same physical storage. Minutes instead of hours, but a
-//!   drive with a large cache can in principle fool it — `--full` is the
-//!   authoritative answer.
+//! - **quick**: alternates large *spacer* files — allocated with SetEndOfFile
+//!   but never written — with tiny 4 KiB *marker* files that are fully
+//!   written. The spacers push each marker's clusters further along the
+//!   device's address space without paying for the writes; on an
+//!   address-wrapping fake, markers that alias the same physical storage
+//!   overwrite each other, and on a discarding fake the markers past the real
+//!   capacity read back garbage. Spacer allocation is a metadata operation on
+//!   NTFS (sparse) and exFAT (valid data length). FAT32 zero-fills allocations
+//!   and cannot be probed quickly — callers should warn (see
+//!   `Drive::fs_name`). A drive with a large RAM cache can in principle fool
+//!   quick mode; `--full` is the authoritative answer.
 
 use crate::pattern;
 use crate::speed::{AlignedBuf, open_unbuffered};
@@ -97,6 +102,17 @@ fn bytes_bar(prefix: &'static str, total: u64) -> ProgressBar {
     bar
 }
 
+fn files_bar(prefix: &'static str, total: u64) -> ProgressBar {
+    let bar = ProgressBar::new(total);
+    bar.set_style(
+        ProgressStyle::with_template("  {prefix:18} [{bar:32.cyan/238}] {pos}/{len}")
+            .expect("template")
+            .progress_chars("━╸─"),
+    );
+    bar.set_prefix(prefix);
+    bar
+}
+
 /// Count differing bytes in `got` vs the pattern at `offset`; returns
 /// (corrupt bytes, first corrupt index).
 fn diff_block(got: &[u8], offset: u64) -> (u64, Option<usize>) {
@@ -140,6 +156,7 @@ pub fn full(root: &Path, free: u64, limit_gb: Option<u64>, keep: bool) -> io::Re
             let base = i as u64 * CHUNK;
             let mut written = 0u64;
             while written < size {
+                cleanup::check_abort()?;
                 pattern::fill(buf.as_mut_slice(), base + written);
                 file.write_all(buf.as_slice())?;
                 written += BLOCK as u64;
@@ -160,6 +177,7 @@ pub fn full(root: &Path, free: u64, limit_gb: Option<u64>, keep: bool) -> io::Re
             let base = i as u64 * CHUNK;
             let mut read = 0u64;
             while read < size {
+                cleanup::check_abort()?;
                 file.read_exact(buf.as_mut_slice())?;
                 let (bad, first) = diff_block(buf.as_slice(), base + read);
                 corrupt_bytes += bad;
@@ -195,20 +213,8 @@ pub fn full(root: &Path, free: u64, limit_gb: Option<u64>, keep: bool) -> io::Re
     result
 }
 
-/// Marker offsets within a file of `size` bytes: start, middle, end.
-fn marker_offsets(size: u64) -> Vec<u64> {
-    let mut offs = vec![0u64];
-    let mid = (size / 2) & !(MARKER as u64 - 1);
-    if mid > 0 && mid < size - MARKER as u64 {
-        offs.push(mid);
-    }
-    offs.push(size - MARKER as u64);
-    offs
-}
-
-/// Ask NTFS to treat the file as sparse so marker writes at high offsets do
-/// not trigger zero-filling up to the valid-data length. Harmless no-op on
-/// filesystems without sparse support (FAT32/exFAT).
+/// Ask NTFS to treat the file as sparse so allocation costs nothing. Harmless
+/// no-op on filesystems without sparse support (FAT32/exFAT).
 fn try_set_sparse(file: &File) {
     let handle = HANDLE(file.as_raw_handle());
     let mut returned = 0u32;
@@ -226,7 +232,39 @@ fn try_set_sparse(file: &File) {
     }
 }
 
-/// Preallocate files across free space and verify spaced 4K markers.
+/// One spacer + marker pair in the quick-mode layout.
+struct Pair {
+    spacer: PathBuf,
+    spacer_size: u64,
+    marker: PathBuf,
+    /// Logical position of the marker within the tested span; also its
+    /// pattern seed, so every marker's content is unique and reproducible.
+    position: u64,
+}
+
+fn plan_pairs(root: &Path, total: u64) -> Vec<Pair> {
+    let mut pairs = Vec::new();
+    let mut position = 0u64;
+    let mut remaining = total;
+    while remaining >= (32 << 20) {
+        let spacer_size = CHUNK.min(remaining - MARKER as u64);
+        let spacer_size = spacer_size - (spacer_size % BLOCK as u64);
+        let i = pairs.len();
+        position += spacer_size;
+        pairs.push(Pair {
+            spacer: root.join(format!("flashmark_sp_{i:04}.fmk")),
+            spacer_size,
+            marker: root.join(format!("flashmark_mk_{i:04}.fmk")),
+            position,
+        });
+        position += MARKER as u64;
+        remaining -= spacer_size + MARKER as u64;
+    }
+    pairs
+}
+
+/// Span free space with unwritten spacer files and verify the 4K markers
+/// placed between them.
 pub fn quick(
     root: &Path,
     free: u64,
@@ -234,51 +272,49 @@ pub fn quick(
     keep: bool,
 ) -> io::Result<VerifyOutcome> {
     let total: u64 = budget(free, limit_gb)?;
-    let sizes = plan_files(total);
-    let spanned: u64 = sizes.iter().sum();
-    let paths: Vec<PathBuf> = (0..sizes.len()).map(|i| root.join(file_name(i))).collect();
-    for p in &paths {
-        cleanup::register(p.clone());
+    let pairs = plan_pairs(root, total);
+    if pairs.is_empty() {
+        return Err(io::Error::other("not enough space for a spacer/marker pair"));
+    }
+    let spanned: u64 = pairs
+        .iter()
+        .map(|p| p.spacer_size + MARKER as u64)
+        .sum();
+    for p in &pairs {
+        cleanup::register(p.spacer.clone());
+        cleanup::register(p.marker.clone());
     }
 
     let result = (|| {
         let mut buf = AlignedBuf::new(MARKER);
 
-        let bar = ProgressBar::new(sizes.len() as u64 * 2);
-        bar.set_style(
-            ProgressStyle::with_template("  {prefix:16} [{bar:32.cyan/238}] {pos}/{len} files")
-                .expect("template")
-                .progress_chars("━╸─"),
-        );
-        bar.set_prefix("writing markers");
+        let bar = files_bar("placing markers", pairs.len() as u64);
+        for pair in &pairs {
+            cleanup::check_abort()?;
+            let spacer = File::create(&pair.spacer)?;
+            try_set_sparse(&spacer);
+            spacer.set_len(pair.spacer_size)?;
+            drop(spacer);
 
-        for (i, (path, &size)) in paths.iter().zip(&sizes).enumerate() {
-            let mut file = open_unbuffered(path, true)?;
-            try_set_sparse(&file);
-            file.set_len(size)?;
-            let base = i as u64 * CHUNK;
-            for off in marker_offsets(size) {
-                pattern::fill(buf.as_mut_slice(), base + off);
-                file.seek(SeekFrom::Start(off))?;
-                file.write_all(buf.as_slice())?;
-            }
+            let mut marker = open_unbuffered(&pair.marker, true)?;
+            pattern::fill(buf.as_mut_slice(), pair.position);
+            marker.write_all(buf.as_slice())?;
             bar.inc(1);
         }
 
-        bar.set_prefix("verifying markers");
+        bar.finish_and_clear();
+        let bar = files_bar("verifying markers", pairs.len() as u64);
         let mut corrupt_bytes = 0u64;
         let mut first_error: Option<u64> = None;
-        for (i, (path, &size)) in paths.iter().zip(&sizes).enumerate() {
-            let mut file = open_unbuffered(path, false)?;
-            let base = i as u64 * CHUNK;
-            for off in marker_offsets(size) {
-                file.seek(SeekFrom::Start(off))?;
-                file.read_exact(buf.as_mut_slice())?;
-                let (bad, first) = diff_block(buf.as_slice(), base + off);
-                corrupt_bytes += bad;
-                if first_error.is_none() {
-                    first_error = first.map(|f| base + off + f as u64);
-                }
+        for pair in &pairs {
+            cleanup::check_abort()?;
+            let mut marker = open_unbuffered(&pair.marker, false)?;
+            marker.seek(SeekFrom::Start(0))?;
+            marker.read_exact(buf.as_mut_slice())?;
+            let (bad, first) = diff_block(buf.as_slice(), pair.position);
+            corrupt_bytes += bad;
+            if first_error.is_none() {
+                first_error = first.map(|f| pair.position + f as u64);
             }
             bar.inc(1);
         }
@@ -287,7 +323,7 @@ pub fn quick(
         Ok(VerifyOutcome {
             mode: "quick",
             bytes_spanned: spanned,
-            files: sizes.len(),
+            files: pairs.len() * 2,
             write_mbps: None,
             read_mbps: None,
             corrupt_bytes,
@@ -295,10 +331,14 @@ pub fn quick(
         })
     })();
 
+    let all_paths: Vec<PathBuf> = pairs
+        .iter()
+        .flat_map(|p| [p.spacer.clone(), p.marker.clone()])
+        .collect();
     if !keep || result.is_err() {
-        remove_files(&paths);
+        remove_files(&all_paths);
     } else {
-        for p in &paths {
+        for p in &all_paths {
             cleanup::unregister(p);
         }
     }
@@ -333,6 +373,22 @@ mod tests {
         assert_eq!(plan_files(CHUNK * 2 + (32 << 20)), vec![CHUNK, CHUNK, 32 << 20]);
         // Sub-16MiB remainder is dropped rather than creating a tiny file.
         assert_eq!(plan_files(CHUNK + (8 << 20)), vec![CHUNK]);
+    }
+
+    #[test]
+    fn plan_pairs_covers_span_with_unique_positions() {
+        let root = Path::new("X:\\");
+        let pairs = plan_pairs(root, CHUNK * 3 + (128 << 20));
+        assert!(pairs.len() >= 3);
+        let spanned: u64 = pairs.iter().map(|p| p.spacer_size + MARKER as u64).sum();
+        assert!(spanned <= CHUNK * 3 + (128 << 20));
+        // Positions strictly increase and match the cumulative layout.
+        let mut expected_pos = 0u64;
+        for p in &pairs {
+            expected_pos += p.spacer_size;
+            assert_eq!(p.position, expected_pos);
+            expected_pos += MARKER as u64;
+        }
     }
 }
 

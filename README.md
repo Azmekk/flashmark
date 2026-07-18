@@ -33,7 +33,7 @@ Exit code is non-zero when capacity verification fails, so the tool scripts clea
 
 - **MB/s is decimal** (10^6), matching drive marketing and CrystalDiskMark.
 - Effective per-link ceilings: USB 1.1 ≈ 1 MB/s · USB 2.0 ≈ 40 MB/s · 5 Gbps ≈ 450 MB/s · 10 Gbps ≈ 900 MB/s. A "USB 3" stick topping out at ~35 MB/s is either on a USB 2 link (the tool tells you) or built from slow flash behind a fast controller (the report card notes this too).
-- **Quick verify** preallocates files across free space and checks 4K markers at the start/middle/end of each — address-wrapping fakes fail in minutes. A drive with a large RAM cache could in principle fool it; `--full` is the authoritative answer.
+- **Quick verify** alternates large *unwritten* spacer files with tiny fully-written 4K marker files, pushing markers across the device's address space without paying for the writes — address-wrapping and discarding fakes fail in minutes. A drive with a large RAM cache could in principle fool it; `--full` is the authoritative answer. Note: on FAT32 the filesystem zero-fills allocations, so quick mode runs at full-write speed there (the tool warns; exFAT and NTFS are instant).
 - On a failed verify, the first corrupt offset yields an **estimated real capacity**.
 
 ## Safety
@@ -52,7 +52,9 @@ Requires stable Rust on Windows. No admin rights needed.
 
 ## Known limitations (v0.1)
 
-- USB link detection is implemented but still needs validation against real flash-drive hardware (the development machine had none attached); non-USB drives are correctly identified.
-- Quick verify's preallocation is instant on NTFS (sparse) and exFAT (valid-data length), but FAT32 may zero-fill, degrading quick mode toward full-mode duration.
+- FAT32 cannot be probed quickly: the filesystem physically zero-fills every allocation, so quick verify degrades to full-write speed there. exFAT and NTFS preallocate instantly.
 - Sequential read of the just-written test file can be served partly by the drive's own cache on drives with large RAM buffers; use a bigger `--size-mb` if numbers look implausible.
+- Quick verify has been exercised on real hardware but not yet against an actual counterfeit drive; the detection logic is unit-tested.
 - Windows only. The benchmark/verify core is portable; Linux/macOS need only a platform probe layer (`O_DIRECT`, sysfs).
+
+USB link detection (claimed vs negotiated, including the `_V2` SuperSpeed query) is validated against real hardware.

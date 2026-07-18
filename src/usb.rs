@@ -218,6 +218,31 @@ fn parent(devinst: u32) -> io::Result<u32> {
     Ok(p)
 }
 
+/// Registry string property of a devnode, e.g. "SanDisk Extreme USB Device".
+fn devnode_string_property(devinst: u32, prop: u32) -> Option<String> {
+    let mut buf = [0u16; 256];
+    let mut size = (buf.len() * 2) as u32;
+    let cr = unsafe {
+        CM_Get_DevNode_Registry_PropertyW(
+            devinst,
+            prop,
+            None,
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            0,
+        )
+    };
+    if cr != CR_SUCCESS {
+        return None;
+    }
+    let words = &buf[..(size as usize / 2).min(buf.len())];
+    let s = String::from_utf16_lossy(words)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 /// SPDRP_ADDRESS via cfgmgr: for a device on a USB hub this is the port number.
 fn devnode_address(devinst: u32) -> io::Result<u32> {
     let mut value = 0u32;
@@ -322,6 +347,9 @@ fn connection_flags_v2(hub: &File, port: u32) -> Option<u32> {
     let mut info = USB_NODE_CONNECTION_INFORMATION_EX_V2::default();
     info.ConnectionIndex = port;
     info.Length = size_of::<USB_NODE_CONNECTION_INFORMATION_EX_V2>() as u32;
+    // On input the caller must declare which protocols it understands
+    // (Usb110 | Usb200 | Usb300), or the hub driver reports nothing useful.
+    info.SupportedUsbProtocols = windows::Win32::Devices::Usb::USB_PROTOCOLS { ul: 0x07 };
     let mut returned = 0u32;
     let ok = unsafe {
         DeviceIoControl(
@@ -399,25 +427,35 @@ pub fn for_drive(drive: &Drive) -> io::Result<UsbInfo> {
     let desc = info.DeviceDescriptor;
     let v2_flags = connection_flags_v2(&hub, port);
 
-    // Speed values 0..2 are USB_DEVICE_SPEED low/full/high; 3 means SuperSpeed
-    // "or higher" — the V2 flags distinguish plain 5 Gbps from 10+ Gbps
-    // (bit 2: operating at SuperSpeedPlus or higher).
-    let negotiated = match info.Speed {
-        0 => LinkSpeed::Low,
-        1 => LinkSpeed::Full,
-        2 => LinkSpeed::High,
-        _ => match v2_flags {
-            Some(f) if f & 0b100 != 0 => LinkSpeed::SuperPlus,
+    // The V2 flags must be consulted FIRST: the legacy EX query predates USB 3
+    // and reports SuperSpeed devices as UsbHighSpeed (2). V2 flag bit 0 =
+    // operating at SuperSpeed or higher, bit 2 = at SuperSpeedPlus or higher.
+    let negotiated = match v2_flags {
+        Some(f) if f & 0b100 != 0 => LinkSpeed::SuperPlus,
+        Some(f) if f & 0b001 != 0 => LinkSpeed::Super,
+        _ => match info.Speed {
+            0 => LinkSpeed::Low,
+            1 => LinkSpeed::Full,
+            2 => LinkSpeed::High,
             _ => LinkSpeed::Super,
         },
     };
+
+    // Some devices carry no product string descriptor (or stall the request);
+    // the disk devnode's friendly name is a decent stand-in.
+    let product = string_descriptor(&hub, port, desc.iProduct).or_else(|| {
+        devnode_string_property(
+            disk,
+            windows::Win32::Devices::DeviceAndDriverInstallation::CM_DRP_FRIENDLYNAME,
+        )
+    });
 
     Ok(UsbInfo {
         instance_id,
         vid: desc.idVendor,
         pid: desc.idProduct,
         manufacturer: string_descriptor(&hub, port, desc.iManufacturer),
-        product: string_descriptor(&hub, port, desc.iProduct),
+        product,
         serial: string_descriptor(&hub, port, desc.iSerialNumber),
         bcd_usb: desc.bcdUSB,
         negotiated,

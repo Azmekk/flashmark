@@ -107,6 +107,7 @@ fn seq_write(path: &Path, file_size: u64) -> io::Result<f64> {
     let start = Instant::now();
     let mut written = 0u64;
     while written < file_size {
+        cleanup::check_abort()?;
         pattern::fill(buf.as_mut_slice(), written);
         file.write_all(buf.as_slice())?;
         written += SEQ_BLOCK as u64;
@@ -124,6 +125,7 @@ fn seq_read(path: &Path, file_size: u64) -> io::Result<f64> {
     let start = Instant::now();
     let mut read = 0u64;
     while read < file_size {
+        cleanup::check_abort()?;
         file.read_exact(buf.as_mut_slice())?;
         read += SEQ_BLOCK as u64;
         bar.set_position(read);
@@ -151,6 +153,7 @@ fn rnd_phase(
     let start = Instant::now();
     let mut ops = 0u64;
     loop {
+        cleanup::check_abort()?;
         let elapsed = start.elapsed();
         if elapsed >= duration {
             break;

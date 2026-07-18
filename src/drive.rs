@@ -2,7 +2,9 @@
 
 use std::io;
 use std::path::PathBuf;
-use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
+use windows::Win32::Storage::FileSystem::{
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+};
 use windows::core::PCWSTR;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -89,6 +91,27 @@ impl Drive {
         }
         .map_err(|e| io::Error::other(format!("GetDiskFreeSpaceExW failed: {e}")))?;
         Ok((free, total))
+    }
+
+    /// Filesystem name ("NTFS", "exFAT", "FAT32", ...), if queryable.
+    pub fn fs_name(&self) -> Option<String> {
+        let root = wide(&format!("{}:\\", self.letter));
+        let mut fs = [0u16; 64];
+        unsafe {
+            GetVolumeInformationW(
+                PCWSTR(root.as_ptr()),
+                None,
+                None,
+                None,
+                None,
+                Some(&mut fs),
+            )
+        }
+        .ok()?;
+        let s = String::from_utf16_lossy(&fs)
+            .trim_end_matches('\0')
+            .to_string();
+        (!s.is_empty()).then_some(s)
     }
 
     pub fn is_system(&self) -> bool {

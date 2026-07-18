@@ -140,10 +140,28 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(_) if cleanup::aborted() => {
+            ui::warn("interrupted — flashmark test files removed");
+            ExitCode::from(130)
+        }
         Err(e) => {
             ui::error(&format!("{e:#}"));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// FAT32 can't allocate space without physically zero-filling it, so the
+/// quick probe loses its speed advantage there.
+fn warn_if_fat32(drive: &drive::Drive) {
+    if drive
+        .fs_name()
+        .is_some_and(|f| f.eq_ignore_ascii_case("FAT32"))
+    {
+        ui::warn(
+            "FAT32 zero-fills allocations — quick mode will run at full-write speed here; \
+             prefer --full (byte-exact, same duration) or reformat the drive to exFAT",
+        );
     }
 }
 
@@ -173,6 +191,10 @@ fn cmd_info(args: InfoArgs) -> CmdResult {
     } else {
         ui::header(&format!("Drive info — {}", drive.display()));
         ui::kv("drive type", drive.kind().label());
+        ui::kv(
+            "filesystem",
+            &drive.fs_name().unwrap_or_else(|| "unknown".into()),
+        );
         ui::kv("volume size", &report::human_bytes(total));
         ui::kv("free space", &report::human_bytes(free));
         match &usb {
@@ -244,10 +266,16 @@ fn cmd_verify(args: VerifyArgs) -> CmdResult {
             if args.full { "full" } else { "quick" },
             drive.display()
         ));
+        ui::kv(
+            "filesystem",
+            &drive.fs_name().unwrap_or_else(|| "unknown".into()),
+        );
         ui::kv("volume size", &report::human_bytes(total));
         ui::kv("free space", &report::human_bytes(free));
         if args.full {
             ui::warn("full mode writes all free space — this can take hours on large drives");
+        } else {
+            warn_if_fat32(&drive);
         }
         println!();
     }
@@ -291,6 +319,10 @@ fn cmd_test(args: TestArgs) -> CmdResult {
 
     if !args.json {
         ui::header(&format!("Flashmark test — {}", drive.display()));
+        ui::kv(
+            "filesystem",
+            &drive.fs_name().unwrap_or_else(|| "unknown".into()),
+        );
         ui::kv("volume size", &report::human_bytes(total));
         ui::kv("free space", &report::human_bytes(free));
     }
@@ -320,6 +352,9 @@ fn cmd_test(args: TestArgs) -> CmdResult {
     let verify_result = if args.skip_verify {
         None
     } else {
+        if !args.json {
+            warn_if_fat32(&drive);
+        }
         Some(verify::quick(&drive.root(), free, None, false)?)
     };
 
