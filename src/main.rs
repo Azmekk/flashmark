@@ -150,8 +150,49 @@ fn cmd_info(_args: InfoArgs) -> CmdResult {
     Err("not implemented yet".into())
 }
 
-fn cmd_speed(_args: SpeedArgs) -> CmdResult {
-    Err("not implemented yet".into())
+fn cmd_speed(args: SpeedArgs) -> CmdResult {
+    let drive = drive::Drive::parse(&args.drive.drive)?;
+    let dir = match &args.dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            drive.guard_writes(args.guards.allow_fixed)?;
+            drive.root()
+        }
+    };
+    let file_size = args.size_mb.max(16) * (1 << 20);
+    if args.dir.is_none() {
+        let (free, _) = drive.space()?;
+        if free < file_size + (64 << 20) {
+            return Err(format!(
+                "not enough free space on {} for a {} MiB test file",
+                drive.display(),
+                file_size >> 20
+            )
+            .into());
+        }
+    }
+    if !args.json {
+        ui::header(&format!("Speed test — {}", drive.display()));
+        ui::kv("drive type", drive.kind().label());
+        ui::kv("test file", &format!("{} MiB, unbuffered I/O", file_size >> 20));
+        println!();
+    }
+    let result = speed::run(
+        &dir,
+        file_size,
+        std::time::Duration::from_secs(args.duration_s.max(1)),
+    )?;
+    if args.json {
+        let doc = serde_json::json!({
+            "command": "speed",
+            "drive": drive.display(),
+            "result": result,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        report::print_speed(&result);
+    }
+    Ok(())
 }
 
 fn cmd_verify(_args: VerifyArgs) -> CmdResult {
