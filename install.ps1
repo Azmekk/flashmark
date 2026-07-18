@@ -1,9 +1,11 @@
-# Installs flashmark.exe to %LOCALAPPDATA%\Programs\Flashmark and adds that
+# Installs flashmark to %LOCALAPPDATA%\Programs\Flashmark and adds that
 # directory to the user PATH, so `flashmark` works from any terminal.
 #
-# Prefers building from this clone when Rust is available; otherwise downloads
-# the latest release binary with the GitHub CLI (the repo is private, so a
-# plain web download won't work).
+# One-liner (PowerShell):
+#   irm https://raw.githubusercontent.com/Azmekk/flashmark/master/install.ps1 | iex
+#
+# From a clone, `.\install.ps1` builds from source when Rust is available and
+# falls back to downloading the latest release otherwise.
 
 $ErrorActionPreference = 'Stop'
 
@@ -11,17 +13,15 @@ $dest = Join-Path $env:LOCALAPPDATA 'Programs\Flashmark'
 $destExe = Join-Path $dest 'flashmark.exe'
 New-Item -ItemType Directory -Force $dest | Out-Null
 
-if (Get-Command cargo -ErrorAction SilentlyContinue) {
-    Write-Host 'Building release binary...'
+$fromClone = $PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'Cargo.toml'))
+if ($fromClone -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Write-Host 'Building release binary from source...'
     cargo build --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
     Copy-Item (Join-Path $PSScriptRoot 'target\release\flashmark.exe') $destExe -Force
-} elseif (Get-Command gh -ErrorAction SilentlyContinue) {
-    Write-Host 'No Rust toolchain found — downloading the latest release via gh...'
-    gh release download --repo Azmekk/flashmark --pattern 'flashmark.exe' --dir $dest --clobber
-    if ($LASTEXITCODE -ne 0) { throw 'gh release download failed — is there a release yet?' }
 } else {
-    throw 'Neither cargo nor gh is available. Install Rust (https://rustup.rs) or the GitHub CLI (https://cli.github.com).'
+    Write-Host 'Downloading the latest flashmark release...'
+    Invoke-WebRequest -Uri 'https://github.com/Azmekk/flashmark/releases/latest/download/flashmark.exe' -OutFile $destExe
 }
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

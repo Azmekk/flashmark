@@ -8,10 +8,10 @@ A flash-drive testing utility for Windows. Verifies the three claims every USB s
 
 ## Quick start
 
+Install from PowerShell:
+
 ```powershell
-git clone git@github.com:Azmekk/flashmark.git
-cd flashmark
-.\install.ps1          # builds and puts flashmark on your user PATH
+irm https://raw.githubusercontent.com/Azmekk/flashmark/master/install.ps1 | iex
 ```
 
 Open a new terminal, plug in the stick (say it mounted as `E:`), and run:
@@ -20,7 +20,7 @@ Open a new terminal, plug in the stick (say it mounted as `E:`), and run:
 flashmark test E:      # full check: USB link + speed + quick capacity probe
 ```
 
-Alternatives: `cargo install --path .` if you prefer cargo's bin directory, or grab `flashmark.exe` from the latest [release](../../releases) / CI artifact — it's a single self-contained binary, no runtime needed. Without Rust installed, `install.ps1` downloads the release binary via the GitHub CLI.
+The installer downloads the latest release binary (a single self-contained exe, no runtime needed) into `%LOCALAPPDATA%\Programs\Flashmark` and adds it to your user PATH. Alternatives: clone and run `.\install.ps1` to build from source, `cargo install --path .`, or grab `flashmark.exe` from the latest [release](../../releases).
 
 ## Usage
 
