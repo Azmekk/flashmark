@@ -95,6 +95,9 @@ struct VerifyArgs {
     /// Keep test files after the run (useful for re-verification)
     #[arg(long)]
     keep: bool,
+    /// Override directory for test files — must be on the named drive (dev use)
+    #[arg(long, hide = true)]
+    dir: Option<String>,
     /// Machine-readable JSON output
     #[arg(long)]
     json: bool,
@@ -195,14 +198,65 @@ fn cmd_speed(args: SpeedArgs) -> CmdResult {
     Ok(())
 }
 
-fn cmd_verify(_args: VerifyArgs) -> CmdResult {
-    Err("not implemented yet".into())
+fn cmd_verify(args: VerifyArgs) -> CmdResult {
+    let drive = drive::Drive::parse(&args.drive.drive)?;
+    let root = match &args.dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            drive.guard_writes(args.guards.allow_fixed)?;
+            drive.root()
+        }
+    };
+    let (free, total) = drive.space()?;
+    if !args.json {
+        ui::header(&format!(
+            "Capacity verify ({}) — {}",
+            if args.full { "full" } else { "quick" },
+            drive.display()
+        ));
+        ui::kv("volume size", &report::human_bytes(total));
+        ui::kv("free space", &report::human_bytes(free));
+        if args.full {
+            ui::warn("full mode writes all free space — this can take hours on large drives");
+        }
+        println!();
+    }
+    let outcome = if args.full {
+        verify::full(&root, free, args.limit_gb, args.keep)?
+    } else {
+        verify::quick(&root, free, args.limit_gb, args.keep)?
+    };
+    let used_before = total - free;
+    if args.json {
+        let doc = serde_json::json!({
+            "command": "verify",
+            "drive": drive.display(),
+            "volume_total_bytes": total,
+            "result": outcome,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        report::print_verify(&outcome, used_before, total);
+    }
+    if !outcome.is_ok() {
+        return Err("capacity verification FAILED — the drive is misreporting its capacity".into());
+    }
+    Ok(())
 }
 
 fn cmd_test(_args: TestArgs) -> CmdResult {
     Err("not implemented yet".into())
 }
 
-fn cmd_clean(_args: CleanArgs) -> CmdResult {
-    Err("not implemented yet".into())
+fn cmd_clean(args: CleanArgs) -> CmdResult {
+    let drive = drive::Drive::parse(&args.drive.drive)?;
+    if drive.kind() == drive::DriveKind::NoRootDir {
+        return Err(format!("drive {} does not exist", drive.display()).into());
+    }
+    let removed = verify::clean(&drive.root())?;
+    ui::ok(&format!(
+        "removed {removed} flashmark test file(s) from {}",
+        drive.display()
+    ));
+    Ok(())
 }
