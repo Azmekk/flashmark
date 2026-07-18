@@ -149,8 +149,38 @@ fn main() -> ExitCode {
 
 type CmdResult = Result<(), Box<dyn std::error::Error>>;
 
-fn cmd_info(_args: InfoArgs) -> CmdResult {
-    Err("not implemented yet".into())
+fn cmd_info(args: InfoArgs) -> CmdResult {
+    let drive = drive::Drive::parse(&args.drive.drive)?;
+    if drive.kind() == drive::DriveKind::NoRootDir {
+        return Err(format!("drive {} does not exist", drive.display()).into());
+    }
+    let (free, total) = drive.space()?;
+    let usb = usb::for_drive(&drive);
+    if args.json {
+        let usb_value = match &usb {
+            Ok(u) => serde_json::to_value(u)?,
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        };
+        let doc = serde_json::json!({
+            "command": "info",
+            "drive": drive.display(),
+            "drive_type": drive.kind().label(),
+            "volume_total_bytes": total,
+            "volume_free_bytes": free,
+            "usb": usb_value,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        ui::header(&format!("Drive info — {}", drive.display()));
+        ui::kv("drive type", drive.kind().label());
+        ui::kv("volume size", &report::human_bytes(total));
+        ui::kv("free space", &report::human_bytes(free));
+        match &usb {
+            Ok(u) => report::print_usb(u),
+            Err(e) => ui::warn(&format!("USB details unavailable: {e}")),
+        }
+    }
+    Ok(())
 }
 
 fn cmd_speed(args: SpeedArgs) -> CmdResult {

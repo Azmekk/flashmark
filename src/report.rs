@@ -18,6 +18,36 @@ pub fn human_bytes(b: u64) -> String {
     }
 }
 
+pub fn print_usb(u: &crate::usb::UsbInfo) {
+    let device = match (&u.manufacturer, &u.product) {
+        (Some(m), Some(p)) => format!("{m} {p}"),
+        (None, Some(p)) => p.clone(),
+        _ => "(no product string)".to_string(),
+    };
+    ui::kv("USB device", &device);
+    let mut id = format!("{:04X}:{:04X}", u.vid, u.pid);
+    if let Some(s) = &u.serial {
+        id.push_str(&format!("  s/n {s}"));
+    }
+    ui::kv("VID:PID", &id);
+    ui::kv("claims", &format!("USB {}", u.claimed_version()));
+    ui::kv("negotiated link", u.negotiated.label());
+    ui::kv("hub port", &u.port.to_string());
+    println!();
+    if u.link_downgraded() {
+        ui::warn(
+            "device claims USB 3 but the link negotiated USB 2 speeds — the drive, cable, or port is not delivering (try a blue/SS port)",
+        );
+    } else if u.claims_usb3() {
+        ui::ok("link speed matches the USB 3 claim");
+    } else {
+        ui::ok(&format!(
+            "USB {} device running at its expected link speed",
+            u.claimed_version()
+        ));
+    }
+}
+
 pub fn print_verify(o: &VerifyOutcome, used_before: u64, total: u64) {
     ui::kv(
         "space tested",
