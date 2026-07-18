@@ -6,6 +6,22 @@ A flash-drive testing utility for Windows. Verifies the three claims every USB s
 - **Capacity** — detects fake flash (a "1 TB" stick that is really 32 GB) with a quick marker probe or a full H2testw-style every-byte verification
 - **USB version** — reads the *negotiated* link speed from the USB hub and compares it against the spec the device *claims* in its own descriptor (`bcdUSB`)
 
+## Quick start
+
+```powershell
+git clone git@github.com:Azmekk/flashmark.git
+cd flashmark
+.\install.ps1          # builds and puts flashmark on your user PATH
+```
+
+Open a new terminal, plug in the stick (say it mounted as `E:`), and run:
+
+```powershell
+flashmark test E:      # full check: USB link + speed + quick capacity probe
+```
+
+Alternatives: `cargo install --path .` if you prefer cargo's bin directory, or grab `flashmark.exe` from the latest [release](../../releases) / CI artifact — it's a single self-contained binary, no runtime needed. Without Rust installed, `install.ps1` downloads the release binary via the GitHub CLI.
+
 ## Usage
 
 ```
