@@ -2,7 +2,126 @@
 
 use crate::speed::SpeedResult;
 use crate::ui;
+use crate::usb::{LinkSpeed, UsbInfo};
 use crate::verify::VerifyOutcome;
+
+pub struct CardInput<'a> {
+    pub drive_display: String,
+    pub total: u64,
+    pub used_before: u64,
+    pub usb: Option<&'a UsbInfo>,
+    pub speed: &'a SpeedResult,
+    pub verify: Option<&'a VerifyOutcome>,
+}
+
+/// Cross-check measured throughput against the negotiated link.
+pub fn speed_link_note(u: &UsbInfo, r: &SpeedResult) -> Option<String> {
+    let best = r.seq_read_mbps.max(r.seq_write_mbps);
+    let usb2_ceiling = LinkSpeed::High.effective_ceiling_mbps();
+    if u.negotiated >= LinkSpeed::Super && best <= usb2_ceiling * 1.1 {
+        return Some(
+            "throughput is USB 2-class despite a SuperSpeed link — the flash itself is the bottleneck".into(),
+        );
+    }
+    if u.negotiated <= LinkSpeed::High && best >= u.negotiated.effective_ceiling_mbps() * 0.8 {
+        return Some(format!(
+            "sequential speed is capped by the {} link — the flash may be capable of more",
+            u.negotiated.label()
+        ));
+    }
+    None
+}
+
+/// (tier, summary) where tier is PASS/WARN/FAIL.
+pub fn verdict(c: &CardInput) -> (&'static str, String) {
+    if let Some(v) = c.verify {
+        if !v.is_ok() {
+            let est = v
+                .first_error_offset
+                .map(|off| format!(" — estimated real capacity ~{}", human_bytes(c.used_before + off)))
+                .unwrap_or_default();
+            return ("FAIL", format!("drive is misreporting its capacity{est}"));
+        }
+    }
+    if let Some(u) = c.usb {
+        if u.link_downgraded() {
+            return (
+                "WARN",
+                "capacity checks passed, but the USB 3 claim is not met by the negotiated link".into(),
+            );
+        }
+    }
+    let cap = match c.verify {
+        Some(v) if v.mode == "full" => "capacity verified",
+        Some(_) => "capacity spot-check passed",
+        None => "capacity not tested",
+    };
+    let link = match c.usb {
+        Some(_) => "link as advertised",
+        None => "USB link not identified",
+    };
+    ("PASS", format!("{cap} · {link} · speeds recorded"))
+}
+
+pub fn print_card(c: &CardInput) {
+    ui::header(&format!("Report card — {}", c.drive_display));
+    if let Some(u) = c.usb {
+        let name = u.product.clone().unwrap_or_else(|| "(unknown device)".into());
+        ui::kv("device", &format!("{name} ({:04X}:{:04X})", u.vid, u.pid));
+        ui::kv(
+            "usb link",
+            &format!(
+                "claims USB {} — negotiated {}",
+                u.claimed_version(),
+                u.negotiated.label()
+            ),
+        );
+    } else {
+        ui::kv("device", "(not identified as USB)");
+    }
+    let cap = match c.verify {
+        Some(v) if v.is_ok() => format!(
+            "claimed {} — {} verify passed ({} spanned)",
+            human_bytes(c.total),
+            v.mode,
+            human_bytes(v.bytes_spanned)
+        ),
+        Some(v) => format!(
+            "claimed {} — {} verify FAILED ({} corrupt byte(s))",
+            human_bytes(c.total),
+            v.mode,
+            v.corrupt_bytes
+        ),
+        None => format!("claimed {} — not verified", human_bytes(c.total)),
+    };
+    ui::kv("capacity", &cap);
+    ui::kv(
+        "sequential",
+        &format!(
+            "write {:.1} MB/s · read {:.1} MB/s",
+            c.speed.seq_write_mbps, c.speed.seq_read_mbps
+        ),
+    );
+    ui::kv(
+        "random 4K",
+        &format!(
+            "write {:.0} IOPS · read {:.0} IOPS",
+            c.speed.rnd_write_iops, c.speed.rnd_read_iops
+        ),
+    );
+    println!();
+    let (tier, summary) = verdict(c);
+    match tier {
+        "PASS" => ui::ok(&format!("PASS — {summary}")),
+        "WARN" => ui::warn(&format!("WARN — {summary}")),
+        _ => ui::error(&format!("FAIL — {summary}")),
+    }
+    if let Some(u) = c.usb {
+        if let Some(note) = speed_link_note(u, c.speed) {
+            println!("  note: {note}");
+        }
+    }
+}
 
 /// Decimal units (GB = 10^9), matching how drive capacity is marketed.
 pub fn human_bytes(b: u64) -> String {

@@ -274,8 +274,85 @@ fn cmd_verify(args: VerifyArgs) -> CmdResult {
     Ok(())
 }
 
-fn cmd_test(_args: TestArgs) -> CmdResult {
-    Err("not implemented yet".into())
+fn cmd_test(args: TestArgs) -> CmdResult {
+    let drive = drive::Drive::parse(&args.drive.drive)?;
+    drive.guard_writes(args.guards.allow_fixed)?;
+    let (free, total) = drive.space()?;
+    let used_before = total - free;
+    let file_size = args.size_mb.max(16) * (1 << 20);
+    if free < file_size + (64 << 20) {
+        return Err(format!(
+            "not enough free space on {} for a {} MiB test file",
+            drive.display(),
+            file_size >> 20
+        )
+        .into());
+    }
+
+    if !args.json {
+        ui::header(&format!("Flashmark test — {}", drive.display()));
+        ui::kv("volume size", &report::human_bytes(total));
+        ui::kv("free space", &report::human_bytes(free));
+    }
+
+    let usb = match usb::for_drive(&drive) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            if !args.json {
+                ui::warn(&format!("USB details unavailable: {e}"));
+            }
+            None
+        }
+    };
+    if !args.json {
+        if let Some(u) = &usb {
+            report::print_usb(u);
+        }
+        println!();
+    }
+
+    let speed_result = speed::run(&drive.root(), file_size, std::time::Duration::from_secs(5))?;
+    if !args.json {
+        report::print_speed(&speed_result);
+        println!();
+    }
+
+    let verify_result = if args.skip_verify {
+        None
+    } else {
+        Some(verify::quick(&drive.root(), free, None, false)?)
+    };
+
+    let card = report::CardInput {
+        drive_display: drive.display(),
+        total,
+        used_before,
+        usb: usb.as_ref(),
+        speed: &speed_result,
+        verify: verify_result.as_ref(),
+    };
+
+    if args.json {
+        let (tier, summary) = report::verdict(&card);
+        let doc = serde_json::json!({
+            "command": "test",
+            "drive": drive.display(),
+            "volume_total_bytes": total,
+            "usb": usb,
+            "speed": speed_result,
+            "verify": verify_result,
+            "verdict": { "tier": tier, "summary": summary },
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        report::print_card(&card);
+    }
+
+    let (tier, _) = report::verdict(&card);
+    if tier == "FAIL" {
+        return Err("test FAILED — see report above".into());
+    }
+    Ok(())
 }
 
 fn cmd_clean(args: CleanArgs) -> CmdResult {
