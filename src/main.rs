@@ -4,6 +4,7 @@ mod pattern;
 mod report;
 mod speed;
 mod ui;
+mod update;
 mod usb;
 mod verify;
 
@@ -33,6 +34,15 @@ enum Command {
     Test(TestArgs),
     /// Remove leftover flashmark test files
     Clean(CleanArgs),
+    /// Update flashmark to the latest release
+    Update(UpdateArgs),
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    /// Only check whether a newer release exists
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Args)]
@@ -136,6 +146,7 @@ fn main() -> ExitCode {
         Command::Verify(args) => cmd_verify(args),
         Command::Test(args) => cmd_test(args),
         Command::Clean(args) => cmd_clean(args),
+        Command::Update(args) => cmd_update(args),
     };
 
     match result {
@@ -149,6 +160,30 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_update(args: UpdateArgs) -> CmdResult {
+    ui::kv("current version", update::CURRENT);
+    let latest = update::latest_version()?;
+    ui::kv("latest release", &latest);
+    if !update::is_newer(&latest, update::CURRENT) {
+        ui::ok("already up to date");
+        return Ok(());
+    }
+    if args.check {
+        ui::warn(&format!(
+            "update available: {} → {latest} — run 'flashmark update'",
+            update::CURRENT
+        ));
+        return Ok(());
+    }
+    match update::self_update()? {
+        update::Outcome::Updated { to } => {
+            ui::ok(&format!("updated {} → {to}", update::CURRENT));
+        }
+        update::Outcome::UpToDate => ui::ok("already up to date"),
+    }
+    Ok(())
 }
 
 /// FAT32 can't allocate space without physically zero-filling it, so the

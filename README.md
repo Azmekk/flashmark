@@ -20,7 +20,7 @@ Open a new terminal, plug in the stick (say it mounted as `E:`), and run:
 flashmark test E:      # full check: USB link + speed + quick capacity probe
 ```
 
-The installer downloads the latest release binary (a single self-contained exe, no runtime needed) into `%LOCALAPPDATA%\Programs\Flashmark` and adds it to your user PATH. Alternatives: clone and run `.\install.ps1` to build from source, `cargo install --path .`, or grab `flashmark.exe` from the latest [release](../../releases).
+The installer downloads the latest release binary (a single self-contained exe, no runtime needed) into `%LOCALAPPDATA%\Programs\Flashmark` and adds it to your user PATH. Later, `flashmark update` upgrades in place. Alternatives: clone and run `.\install.ps1` to build from source, `cargo install --path .`, or grab `flashmark.exe` from the latest [release](../../releases).
 
 ## Usage
 
@@ -30,6 +30,7 @@ flashmark speed  <drive>    # sequential + random 4K benchmark
 flashmark verify <drive>    # capacity check (quick probe by default)
 flashmark test   <drive>    # info + speed + quick verify → report card
 flashmark clean  <drive>    # remove leftover flashmark test files
+flashmark update            # self-update to the latest release (--check to only look)
 ```
 
 Useful flags:
