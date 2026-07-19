@@ -67,7 +67,7 @@ cargo build --release   # → target/release/flashmark.exe
 
 Requires stable Rust on Windows. No admin rights needed.
 
-## Known limitations (v0.1)
+## Known limitations
 
 - FAT32 cannot be probed quickly: the filesystem physically zero-fills every allocation, so quick verify degrades to full-write speed there. exFAT and NTFS preallocate instantly.
 - Sequential read of the just-written test file can be served partly by the drive's own cache on drives with large RAM buffers; use a bigger `--size-mb` if numbers look implausible.
